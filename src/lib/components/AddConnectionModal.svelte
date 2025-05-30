@@ -30,8 +30,17 @@
 	let url = '';
 	let key = '';
 
+	let connectionType = 'external';
+	let azure = false;
+	$: azure =
+		(url.includes('azure.com') || url.includes('cognitive.microsoft.com')) && !direct
+			? true
+			: false;
+
 	let prefixId = '';
 	let enable = true;
+	let apiVersion = '';
+
 	let tags = [];
 
 	let modelId = '';
@@ -40,7 +49,10 @@
 	let loading = false;
 
 	const verifyOllamaHandler = async () => {
-		const res = await verifyOllamaConnection(localStorage.token, url, key).catch((error) => {
+		const res = await verifyOllamaConnection(localStorage.token, {
+			url,
+			key
+		}).catch((error) => {
 			toast.error(`${error}`);
 		});
 
@@ -50,11 +62,20 @@
 	};
 
 	const verifyOpenAIHandler = async () => {
-		const res = await verifyOpenAIConnection(localStorage.token, url, key, direct).catch(
-			(error) => {
-				toast.error(`${error}`);
-			}
-		);
+		const res = await verifyOpenAIConnection(
+			localStorage.token,
+			{
+				url,
+				key,
+				config: {
+					azure: azure,
+					api_version: apiVersion
+				}
+			},
+			direct
+		).catch((error) => {
+			toast.error(`${error}`);
+		});
 
 		if (res) {
 			toast.success($i18n.t('Server connection verified'));
@@ -79,11 +100,36 @@
 	const submitHandler = async () => {
 		loading = true;
 
-		if (!ollama && (!url || !key)) {
+		if (!ollama && !url) {
 			loading = false;
-			toast.error('URL and Key are required');
+			toast.error('URL is required');
 			return;
 		}
+
+		if (azure) {
+			if (!apiVersion) {
+				loading = false;
+
+				toast.error('API Version is required');
+				return;
+			}
+
+			if (!key) {
+				loading = false;
+
+				toast.error('Key is required');
+				return;
+			}
+
+			if (modelIds.length === 0) {
+				loading = false;
+				toast.error('Deployment names are required');
+				return;
+			}
+		}
+
+		// remove trailing slash from url
+		url = url.replace(/\/$/, '');
 
 		const connection = {
 			url,
@@ -92,7 +138,9 @@
 				enable: enable,
 				tags: tags,
 				prefix_id: prefixId,
-				model_ids: modelIds
+				model_ids: modelIds,
+				connection_type: connectionType,
+				...(!ollama && azure ? { azure: true, api_version: apiVersion } : {})
 			}
 		};
 
@@ -117,6 +165,14 @@
 			tags = connection.config?.tags ?? [];
 			prefixId = connection.config?.prefix_id ?? '';
 			modelIds = connection.config?.model_ids ?? [];
+
+			if (ollama) {
+				connectionType = connection.config?.connection_type ?? 'local';
+			} else {
+				connectionType = connection.config?.connection_type ?? 'external';
+				azure = connection.config?.azure ?? false;
+				apiVersion = connection.config?.api_version ?? '';
+			}
 		}
 	};
 
@@ -131,7 +187,7 @@
 
 <Modal size="sm" bind:show>
 	<div>
-		<div class=" flex justify-between dark:text-gray-100 px-5 pt-4 pb-2">
+		<div class=" flex justify-between dark:text-gray-100 px-5 pt-4 pb-1.5">
 			<div class=" text-lg font-medium self-center font-primary">
 				{#if edit}
 					{$i18n.t('Edit Connection')}
@@ -168,7 +224,31 @@
 					}}
 				>
 					<div class="px-1">
-						<div class="flex gap-2">
+						{#if !direct}
+							<div class="flex gap-2">
+								<div class="flex w-full justify-between items-center">
+									<div class=" text-xs text-gray-500">{$i18n.t('Connection Type')}</div>
+
+									<div class="">
+										<button
+											on:click={() => {
+												connectionType = connectionType === 'local' ? 'external' : 'local';
+											}}
+											type="button"
+											class=" text-xs text-gray-700 dark:text-gray-300"
+										>
+											{#if connectionType === 'local'}
+												{$i18n.t('Local')}
+											{:else}
+												{$i18n.t('External')}
+											{/if}
+										</button>
+									</div>
+								</div>
+							</div>
+						{/if}
+
+						<div class="flex gap-2 mt-1.5">
 							<div class="flex flex-col w-full">
 								<div class=" mb-0.5 text-xs text-gray-500">{$i18n.t('URL')}</div>
 
@@ -223,7 +303,7 @@
 										className="w-full text-sm bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-hidden"
 										bind:value={key}
 										placeholder={$i18n.t('API Key')}
-										required={!ollama}
+										required={false}
 									/>
 								</div>
 							</div>
@@ -248,6 +328,25 @@
 								</div>
 							</div>
 						</div>
+
+						{#if azure}
+							<div class="flex gap-2 mt-2">
+								<div class="flex flex-col w-full">
+									<div class=" mb-1 text-xs text-gray-500">{$i18n.t('API Version')}</div>
+
+									<div class="flex-1">
+										<input
+											class="w-full text-sm bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-hidden"
+											type="text"
+											bind:value={apiVersion}
+											placeholder={$i18n.t('API Version')}
+											autocomplete="off"
+											required
+										/>
+									</div>
+								</div>
+							</div>
+						{/if}
 
 						<div class="flex gap-2 mt-2">
 							<div class="flex flex-col w-full">
@@ -302,19 +401,24 @@
 							{:else}
 								<div class="text-gray-500 text-xs text-center py-2 px-10">
 									{#if ollama}
-										{$i18n.t('Leave empty to include all models from "{{URL}}/api/tags" endpoint', {
-											URL: url
+										{$i18n.t('Leave empty to include all models from "{{url}}/api/tags" endpoint', {
+											url: url
 										})}
+									{:else if azure}
+										{$i18n.t('Deployment names are required for Azure OpenAI')}
+										<!-- {$i18n.t('Leave empty to include all models from "{{url}}" endpoint', {
+											url: `${url}/openai/deployments`
+										})} -->
 									{:else}
-										{$i18n.t('Leave empty to include all models from "{{URL}}/models" endpoint', {
-											URL: url
+										{$i18n.t('Leave empty to include all models from "{{url}}/models" endpoint', {
+											url: url
 										})}
 									{/if}
 								</div>
 							{/if}
 						</div>
 
-						<hr class=" border-gray-100 dark:border-gray-700/10 my-2.5 w-full" />
+						<hr class=" border-gray-100 dark:border-gray-700/10 my-1.5 w-full" />
 
 						<div class="flex items-center">
 							<input
