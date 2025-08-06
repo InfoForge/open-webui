@@ -38,6 +38,7 @@
 	let detectArtifacts = true;
 
 	let richTextInput = true;
+	let showFormattingToolbar = false;
 	let insertPromptAsRichText = false;
 	let promptAutocomplete = false;
 
@@ -61,6 +62,7 @@
 		width: '',
 		height: ''
 	};
+	let imageCompressionInChannels = true;
 
 	// chat export
 	let stylizedPdfExport = true;
@@ -163,6 +165,11 @@
 		saveSettings({ imageCompression });
 	};
 
+	const toggleImageCompressionInChannels = async () => {
+		imageCompressionInChannels = !imageCompressionInChannels;
+		saveSettings({ imageCompressionInChannels });
+	};
+
 	const toggleChatFadeStreamingText = async () => {
 		chatFadeStreamingText = !chatFadeStreamingText;
 		saveSettings({ chatFadeStreamingText: chatFadeStreamingText });
@@ -226,6 +233,11 @@
 	const toggleRichTextInput = async () => {
 		richTextInput = !richTextInput;
 		saveSettings({ richTextInput });
+	};
+
+	const toggleShowFormattingToolbar = async () => {
+		showFormattingToolbar = !showFormattingToolbar;
+		saveSettings({ showFormattingToolbar });
 	};
 
 	const toggleInsertPromptAsRichText = async () => {
@@ -335,6 +347,7 @@
 		chatFadeStreamingText = $settings?.chatFadeStreamingText ?? true;
 
 		richTextInput = $settings?.richTextInput ?? true;
+		showFormattingToolbar = $settings?.showFormattingToolbar ?? false;
 		insertPromptAsRichText = $settings?.insertPromptAsRichText ?? false;
 		promptAutocomplete = $settings?.promptAutocomplete ?? false;
 
@@ -368,6 +381,7 @@
 
 		imageCompression = $settings?.imageCompression ?? false;
 		imageCompressionSize = $settings?.imageCompressionSize ?? { width: '', height: '' };
+		imageCompressionInChannels = $settings?.imageCompressionInChannels ?? true;
 
 		defaultModelId = $settings?.models?.at(0) ?? '';
 		if ($config?.default_models) {
@@ -866,6 +880,29 @@
 				<div>
 					<div class=" py-0.5 flex w-full justify-between">
 						<div id="rich-input-label" class=" self-center text-xs">
+							{$i18n.t('Show Formatting Toolbar')}
+						</div>
+
+						<button
+							aria-labelledby="rich-input-label"
+							class="p-1 px-3 text-xs flex rounded-sm transition"
+							on:click={() => {
+								toggleShowFormattingToolbar();
+							}}
+							type="button"
+						>
+							{#if showFormattingToolbar === true}
+								<span class="ml-2 self-center">{$i18n.t('On')}</span>
+							{:else}
+								<span class="ml-2 self-center">{$i18n.t('Off')}</span>
+							{/if}
+						</button>
+					</div>
+				</div>
+
+				<div>
+					<div class=" py-0.5 flex w-full justify-between">
+						<div id="rich-input-label" class=" self-center text-xs">
 							{$i18n.t('Insert Prompt as Rich Text')}
 						</div>
 
@@ -1337,6 +1374,29 @@
 								placeholder="Height"
 							/>
 						</div>
+					</div>
+				</div>
+
+				<div>
+					<div class=" py-0.5 flex w-full justify-between">
+						<div id="image-compression-label" class=" self-center text-xs">
+							{$i18n.t('Compress Images in Channels')}
+						</div>
+
+						<button
+							aria-labelledby="image-compression-label"
+							class="p-1 px-3 text-xs flex rounded-sm transition"
+							on:click={() => {
+								toggleImageCompressionInChannels();
+							}}
+							type="button"
+						>
+							{#if imageCompressionInChannels === true}
+								<span class="ml-2 self-center">{$i18n.t('On')}</span>
+							{:else}
+								<span class="ml-2 self-center">{$i18n.t('Off')}</span>
+							{/if}
+						</button>
 					</div>
 				</div>
 			{/if}
