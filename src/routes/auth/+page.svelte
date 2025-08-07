@@ -101,18 +101,19 @@
 	};
 
 	const checkOauthCallback = async () => {
-		if (!$page.url.hash) {
-			return;
+		// Get the value of the 'token' cookie
+		function getCookie(name) {
+			const match = document.cookie.match(
+				new RegExp('(?:^|; )' + name.replace(/([.$?*|{}()[\]\\/+^])/g, '\\$1') + '=([^;]*)')
+			);
+			return match ? decodeURIComponent(match[1]) : null;
 		}
-		const hash = $page.url.hash.substring(1);
-		if (!hash) {
-			return;
-		}
-		const params = new URLSearchParams(hash);
-		const token = params.get('token');
+
+		const token = getCookie('token');
 		if (!token) {
 			return;
 		}
+
 		const sessionUser = await getSessionUser(token).catch((error) => {
 			toast.error(`${error}`);
 			return null;
@@ -120,6 +121,7 @@
 		if (!sessionUser) {
 			return;
 		}
+
 		localStorage.token = token;
 		await setSessionUser(sessionUser);
 	};
@@ -261,7 +263,7 @@
 													bind:value={name}
 													type="text"
 													id="name"
-													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-600"
+													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
 													autocomplete="name"
 													placeholder={$i18n.t('Enter Your Full Name')}
 													required
@@ -277,7 +279,7 @@
 												<input
 													bind:value={ldapUsername}
 													type="text"
-													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-600"
+													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
 													autocomplete="username"
 													name="username"
 													id="username"
@@ -294,7 +296,7 @@
 													bind:value={email}
 													type="email"
 													id="email"
-													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-600"
+													class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
 													autocomplete="email"
 													name="email"
 													placeholder={$i18n.t('Enter Your Email')}
@@ -311,7 +313,7 @@
 												bind:value={password}
 												type="password"
 												id="password"
-												class="my-0.5 w-full text-sm outline-hidden bg-transparent"
+												class="my-0.5 w-full text-sm outline-hidden bg-transparent placeholder:text-gray-300 dark:placeholder:text-gray-600"
 												placeholder={$i18n.t('Enter Your Password')}
 												autocomplete={mode === 'signup' ? 'new-password' : 'current-password'}
 												name="password"
