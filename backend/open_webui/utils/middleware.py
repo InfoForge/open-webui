@@ -74,6 +74,7 @@ from open_webui.utils.misc import (
     add_or_update_user_message,
     get_last_user_message,
     get_last_assistant_message,
+    get_system_message,
     prepend_to_first_user_message_content,
     convert_logit_bias_input_to_json,
 )
@@ -84,7 +85,7 @@ from open_webui.utils.filter import (
     process_filter_functions,
 )
 from open_webui.utils.code_interpreter import execute_code_jupyter
-from open_webui.utils.payload import apply_model_system_prompt_to_body
+from open_webui.utils.payload import apply_system_prompt_to_body
 
 
 from open_webui.config import (
@@ -97,8 +98,10 @@ from open_webui.env import (
     SRC_LOG_LEVELS,
     GLOBAL_LOG_LEVEL,
     CHAT_RESPONSE_STREAM_DELTA_CHUNK_SIZE,
+    CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES,
     BYPASS_MODEL_ACCESS_CONTROL,
     ENABLE_REALTIME_CHAT_SAVE,
+    ENABLE_QUERIES_CACHE,
 )
 from open_webui.constants import TASKS
 
@@ -106,6 +109,20 @@ from open_webui.constants import TASKS
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MAIN"])
+
+
+DEFAULT_REASONING_TAGS = [
+    ("<think>", "</think>"),
+    ("<thinking>", "</thinking>"),
+    ("<reason>", "</reason>"),
+    ("<reasoning>", "</reasoning>"),
+    ("<thought>", "</thought>"),
+    ("<Thought>", "</Thought>"),
+    ("<|begin_of_thought|>", "<|end_of_thought|>"),
+    ("◁think▷", "◁/think▷"),
+]
+DEFAULT_SOLUTION_TAGS = [("<|begin_of_solution|>", "<|end_of_solution|>")]
+DEFAULT_CODE_INTERPRETER_TAGS = [("<code_interpreter>", "</code_interpreter>")]
 
 
 async def chat_completion_tools_handler(
@@ -388,6 +405,9 @@ async def chat_web_search_handler(
             queries = queries.get("queries", [])
         except Exception as e:
             queries = [response]
+
+        if ENABLE_QUERIES_CACHE:
+            request.state.cached_queries = queries
 
     except Exception as e:
         log.exception(e)
@@ -688,6 +708,7 @@ def apply_params_to_form_data(form_data, model):
         "stream_response": bool,
         "stream_delta_chunk_size": int,
         "function_calling": str,
+        "reasoning_tags": list,
         "system": str,
     }
 
@@ -737,6 +758,15 @@ async def process_chat_payload(request, form_data, user, metadata, model):
     form_data = apply_params_to_form_data(form_data, model)
     log.debug(f"form_data: {form_data}")
 
+    system_message = get_system_message(form_data.get("messages", []))
+    if system_message:
+        try:
+            form_data = apply_system_prompt_to_body(
+                system_message.get("content"), form_data, metadata, user
+            )
+        except:
+            pass
+
     event_emitter = get_event_emitter(metadata)
     event_call = get_event_call(metadata)
 
@@ -778,7 +808,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
 
             if folder and folder.data:
                 if "system_prompt" in folder.data:
-                    form_data = apply_model_system_prompt_to_body(
+                    form_data = apply_system_prompt_to_body(
                         folder.data["system_prompt"], form_data, metadata, user
                     )
                 if "files" in folder.data:
@@ -855,7 +885,7 @@ async def process_chat_payload(request, form_data, user, metadata, model):
             extra_params=extra_params,
         )
     except Exception as e:
-        raise Exception(f"Error: {e}")
+        raise Exception(f"{e}")
 
     features = form_data.pop("features", None)
     if features:
@@ -1254,111 +1284,134 @@ async def process_chat_response(
     # Non-streaming response
     if not isinstance(response, StreamingResponse):
         if event_emitter:
-            if isinstance(response, dict) or isinstance(response, JSONResponse):
+            try:
+                if isinstance(response, dict) or isinstance(response, JSONResponse):
+                    if isinstance(response, list) and len(response) == 1:
+                        # If the response is a single-item list, unwrap it #17213
+                        response = response[0]
 
-                if isinstance(response, JSONResponse) and isinstance(
-                    response.body, bytes
-                ):
-                    try:
-                        response_data = json.loads(response.body.decode("utf-8"))
-                    except json.JSONDecodeError:
-                        response_data = {"error": {"detail": "Invalid JSON response"}}
-                else:
-                    response_data = response
-
-                if "error" in response_data:
-                    error = response_data["error"].get("detail", response_data["error"])
-                    Chats.upsert_message_to_chat_by_id_and_message_id(
-                        metadata["chat_id"],
-                        metadata["message_id"],
-                        {
-                            "error": {"content": error},
-                        },
-                    )
-
-                if "selected_model_id" in response_data:
-                    Chats.upsert_message_to_chat_by_id_and_message_id(
-                        metadata["chat_id"],
-                        metadata["message_id"],
-                        {
-                            "selectedModelId": response_data["selected_model_id"],
-                        },
-                    )
-
-                choices = response_data.get("choices", [])
-                if choices and choices[0].get("message", {}).get("content"):
-                    content = response_data["choices"][0]["message"]["content"]
-
-                    if content:
-                        await event_emitter(
-                            {
-                                "type": "chat:completion",
-                                "data": response_data,
+                    if isinstance(response, JSONResponse) and isinstance(
+                        response.body, bytes
+                    ):
+                        try:
+                            response_data = json.loads(response.body.decode("utf-8"))
+                        except json.JSONDecodeError:
+                            response_data = {
+                                "error": {"detail": "Invalid JSON response"}
                             }
-                        )
+                    else:
+                        response_data = response
 
-                        title = Chats.get_chat_title_by_id(metadata["chat_id"])
+                    if "error" in response_data:
+                        error = response_data.get("error")
 
-                        await event_emitter(
-                            {
-                                "type": "chat:completion",
-                                "data": {
-                                    "done": True,
-                                    "content": content,
-                                    "title": title,
-                                },
-                            }
-                        )
+                        if isinstance(error, dict):
+                            error = error.get("detail", error)
+                        else:
+                            error = str(error)
 
-                        # Save message in the database
                         Chats.upsert_message_to_chat_by_id_and_message_id(
                             metadata["chat_id"],
                             metadata["message_id"],
                             {
-                                "role": "assistant",
-                                "content": content,
+                                "error": {"content": error},
+                            },
+                        )
+                        if isinstance(error, str) or isinstance(error, dict):
+                            await event_emitter(
+                                {
+                                    "type": "chat:message:error",
+                                    "data": {"error": {"content": error}},
+                                }
+                            )
+
+                    if "selected_model_id" in response_data:
+                        Chats.upsert_message_to_chat_by_id_and_message_id(
+                            metadata["chat_id"],
+                            metadata["message_id"],
+                            {
+                                "selectedModelId": response_data["selected_model_id"],
                             },
                         )
 
-                        # Send a webhook notification if the user is not active
-                        if not get_active_status_by_user_id(user.id):
-                            webhook_url = Users.get_user_webhook_url_by_id(user.id)
-                            if webhook_url:
-                                await post_webhook(
-                                    request.app.state.WEBUI_NAME,
-                                    webhook_url,
-                                    f"{title} - {request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}\n\n{content}",
-                                    {
-                                        "action": "chat",
-                                        "message": content,
+                    choices = response_data.get("choices", [])
+                    if choices and choices[0].get("message", {}).get("content"):
+                        content = response_data["choices"][0]["message"]["content"]
+
+                        if content:
+                            await event_emitter(
+                                {
+                                    "type": "chat:completion",
+                                    "data": response_data,
+                                }
+                            )
+
+                            title = Chats.get_chat_title_by_id(metadata["chat_id"])
+
+                            await event_emitter(
+                                {
+                                    "type": "chat:completion",
+                                    "data": {
+                                        "done": True,
+                                        "content": content,
                                         "title": title,
-                                        "url": f"{request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}",
                                     },
-                                )
+                                }
+                            )
 
-                        await background_tasks_handler()
+                            # Save message in the database
+                            Chats.upsert_message_to_chat_by_id_and_message_id(
+                                metadata["chat_id"],
+                                metadata["message_id"],
+                                {
+                                    "role": "assistant",
+                                    "content": content,
+                                },
+                            )
 
-                if events and isinstance(events, list):
-                    extra_response = {}
-                    for event in events:
-                        if isinstance(event, dict):
-                            extra_response.update(event)
-                        else:
-                            extra_response[event] = True
+                            # Send a webhook notification if the user is not active
+                            if not get_active_status_by_user_id(user.id):
+                                webhook_url = Users.get_user_webhook_url_by_id(user.id)
+                                if webhook_url:
+                                    await post_webhook(
+                                        request.app.state.WEBUI_NAME,
+                                        webhook_url,
+                                        f"{title} - {request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}\n\n{content}",
+                                        {
+                                            "action": "chat",
+                                            "message": content,
+                                            "title": title,
+                                            "url": f"{request.app.state.config.WEBUI_URL}/c/{metadata['chat_id']}",
+                                        },
+                                    )
 
-                    response_data = {
-                        **extra_response,
-                        **response_data,
-                    }
+                            await background_tasks_handler()
 
-                if isinstance(response, dict):
-                    response = response_data
-                if isinstance(response, JSONResponse):
-                    response = JSONResponse(
-                        content=response_data,
-                        headers=response.headers,
-                        status_code=response.status_code,
-                    )
+                    if events and isinstance(events, list):
+                        extra_response = {}
+                        for event in events:
+                            if isinstance(event, dict):
+                                extra_response.update(event)
+                            else:
+                                extra_response[event] = True
+
+                        response_data = {
+                            **extra_response,
+                            **response_data,
+                        }
+
+                    if isinstance(response, dict):
+                        response = response_data
+                    if isinstance(response, JSONResponse):
+                        response = JSONResponse(
+                            content=response_data,
+                            headers=response.headers,
+                            status_code=response.status_code,
+                        )
+
+            except Exception as e:
+                log.debug(f"Error occurred while processing request: {e}")
+                pass
 
             return response
         else:
@@ -1458,7 +1511,7 @@ async def process_chat_response(
                                         tool_result_files = result.get("files", None)
                                         break
 
-                                if tool_result:
+                                if tool_result is not None:
                                     tool_calls_display_content = f'{tool_calls_display_content}<details type="tool_calls" done="true" id="{tool_call_id}" name="{tool_name}" arguments="{html.escape(json.dumps(tool_arguments))}" result="{html.escape(json.dumps(tool_result, ensure_ascii=False))}" files="{html.escape(json.dumps(tool_result_files)) if tool_result_files else ""}">\n<summary>Tool Executed</summary>\n</details>\n'
                                 else:
                                     tool_calls_display_content = f'{tool_calls_display_content}<details type="tool_calls" done="false" id="{tool_call_id}" name="{tool_name}" arguments="{html.escape(json.dumps(tool_arguments))}">\n<summary>Executing...</summary>\n</details>\n'
@@ -1573,7 +1626,7 @@ async def process_chat_response(
                                 {
                                     "role": "tool",
                                     "tool_call_id": result["tool_call_id"],
-                                    "content": result["content"],
+                                    "content": result.get("content", "") or "",
                                 }
                             )
                         temp_blocks = []
@@ -1796,27 +1849,23 @@ async def process_chat_response(
                 }
             ]
 
-            # We might want to disable this by default
-            DETECT_REASONING = True
-            DETECT_SOLUTION = True
+            reasoning_tags_param = metadata.get("params", {}).get("reasoning_tags")
+            DETECT_REASONING_TAGS = reasoning_tags_param is not False
             DETECT_CODE_INTERPRETER = metadata.get("features", {}).get(
                 "code_interpreter", False
             )
 
-            reasoning_tags = [
-                ("<think>", "</think>"),
-                ("<thinking>", "</thinking>"),
-                ("<reason>", "</reason>"),
-                ("<reasoning>", "</reasoning>"),
-                ("<thought>", "</thought>"),
-                ("<Thought>", "</Thought>"),
-                ("<|begin_of_thought|>", "<|end_of_thought|>"),
-                ("◁think▷", "◁/think▷"),
-            ]
-
-            code_interpreter_tags = [("<code_interpreter>", "</code_interpreter>")]
-
-            solution_tags = [("<|begin_of_solution|>", "<|end_of_solution|>")]
+            reasoning_tags = []
+            if DETECT_REASONING_TAGS:
+                if (
+                    isinstance(reasoning_tags_param, list)
+                    and len(reasoning_tags_param) == 2
+                ):
+                    reasoning_tags = [
+                        (reasoning_tags_param[0], reasoning_tags_param[1])
+                    ]
+                else:
+                    reasoning_tags = DEFAULT_REASONING_TAGS
 
             try:
                 for event in events:
@@ -1925,6 +1974,10 @@ async def process_chat_response(
                                                 }
                                             )
                                         usage = data.get("usage", {})
+                                        usage.update(
+                                            data.get("timing", {})
+                                        )  # llama.cpp
+
                                         if usage:
                                             await event_emitter(
                                                 {
@@ -2068,7 +2121,7 @@ async def process_chat_response(
                                             content_blocks[-1]["content"] + value
                                         )
 
-                                        if DETECT_REASONING:
+                                        if DETECT_REASONING_TAGS:
                                             content, content_blocks, _ = (
                                                 tag_content_handler(
                                                     "reasoning",
@@ -2078,11 +2131,20 @@ async def process_chat_response(
                                                 )
                                             )
 
+                                            content, content_blocks, _ = (
+                                                tag_content_handler(
+                                                    "solution",
+                                                    DEFAULT_SOLUTION_TAGS,
+                                                    content,
+                                                    content_blocks,
+                                                )
+                                            )
+
                                         if DETECT_CODE_INTERPRETER:
                                             content, content_blocks, end = (
                                                 tag_content_handler(
                                                     "code_interpreter",
-                                                    code_interpreter_tags,
+                                                    DEFAULT_CODE_INTERPRETER_TAGS,
                                                     content,
                                                     content_blocks,
                                                 )
@@ -2090,16 +2152,6 @@ async def process_chat_response(
 
                                             if end:
                                                 break
-
-                                        if DETECT_SOLUTION:
-                                            content, content_blocks, _ = (
-                                                tag_content_handler(
-                                                    "solution",
-                                                    solution_tags,
-                                                    content,
-                                                    content_blocks,
-                                                )
-                                            )
 
                                         if ENABLE_REALTIME_CHAT_SAVE:
                                             # Save message in the database
@@ -2175,10 +2227,12 @@ async def process_chat_response(
 
                 await stream_body_handler(response, form_data)
 
-                MAX_TOOL_CALL_RETRIES = 10
                 tool_call_retries = 0
 
-                while len(tool_calls) > 0 and tool_call_retries < MAX_TOOL_CALL_RETRIES:
+                while (
+                    len(tool_calls) > 0
+                    and tool_call_retries < CHAT_RESPONSE_MAX_TOOL_CALL_RETRIES
+                ):
 
                     tool_call_retries += 1
 
@@ -2297,7 +2351,7 @@ async def process_chat_response(
                         results.append(
                             {
                                 "tool_call_id": tool_call_id,
-                                "content": tool_result,
+                                "content": tool_result or "",
                                 **(
                                     {"files": tool_result_files}
                                     if tool_result_files
@@ -2584,7 +2638,7 @@ async def process_chat_response(
                 await background_tasks_handler()
             except asyncio.CancelledError:
                 log.warning("Task was cancelled!")
-                await event_emitter({"type": "task-cancelled"})
+                await event_emitter({"type": "chat:tasks:cancel"})
 
                 if not ENABLE_REALTIME_CHAT_SAVE:
                     # Save message in the database

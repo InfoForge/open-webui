@@ -4,6 +4,7 @@ from typing import Optional
 import time
 import re
 import aiohttp
+from open_webui.models.groups import Groups
 from pydantic import BaseModel, HttpUrl
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
@@ -22,7 +23,7 @@ from open_webui.utils.access_control import has_access, has_permission
 from open_webui.utils.tools import get_tool_servers
 
 from open_webui.env import SRC_LOG_LEVELS
-from open_webui.config import CACHE_DIR, ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS
+from open_webui.config import CACHE_DIR, BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.constants import ERROR_MESSAGES
 
 
@@ -67,15 +68,16 @@ async def get_tools(request: Request, user=Depends(get_verified_user)):
             )
         )
 
-    if user.role == "admin" and ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS:
+    if user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL:
         # Admin can see all tools
         return tools
     else:
+        user_group_ids = {group.id for group in Groups.get_groups_by_member_id(user.id)}
         tools = [
             tool
             for tool in tools
             if tool.user_id == user.id
-            or has_access(user.id, "read", tool.access_control)
+            or has_access(user.id, "read", tool.access_control, user_group_ids)
         ]
         return tools
 
@@ -87,7 +89,7 @@ async def get_tools(request: Request, user=Depends(get_verified_user)):
 
 @router.get("/list", response_model=list[ToolUserResponse])
 async def get_tool_list(user=Depends(get_verified_user)):
-    if user.role == "admin" and ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS:
+    if user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL:
         tools = Tools.get_tools()
     else:
         tools = Tools.get_tools_by_user_id(user.id, "write")

@@ -1,6 +1,6 @@
 from typing import List, Optional
 from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 import logging
 
 from open_webui.models.knowledge import (
@@ -25,7 +25,7 @@ from open_webui.utils.access_control import has_access, has_permission
 
 
 from open_webui.env import SRC_LOG_LEVELS
-from open_webui.config import ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS
+from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL
 from open_webui.models.models import Models, ModelForm
 
 
@@ -43,7 +43,7 @@ router = APIRouter()
 async def get_knowledge(user=Depends(get_verified_user)):
     knowledge_bases = []
 
-    if user.role == "admin" and ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS:
+    if user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL:
         knowledge_bases = Knowledges.get_knowledge_bases()
     else:
         knowledge_bases = Knowledges.get_knowledge_bases_by_user_id(user.id, "read")
@@ -91,7 +91,7 @@ async def get_knowledge(user=Depends(get_verified_user)):
 async def get_knowledge_list(user=Depends(get_verified_user)):
     knowledge_bases = []
 
-    if user.role == "admin" and ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS:
+    if user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL:
         knowledge_bases = Knowledges.get_knowledge_bases()
     else:
         knowledge_bases = Knowledges.get_knowledge_bases_by_user_id(user.id, "write")
@@ -492,6 +492,7 @@ def update_file_from_knowledge_by_id(
 def remove_file_from_knowledge_by_id(
     id: str,
     form_data: KnowledgeFileIdForm,
+    delete_file: bool = Query(True),
     user=Depends(get_verified_user),
 ):
     knowledge = Knowledges.get_knowledge_by_id(id=id)
@@ -528,18 +529,19 @@ def remove_file_from_knowledge_by_id(
         log.debug(e)
         pass
 
-    try:
-        # Remove the file's collection from vector database
-        file_collection = f"file-{form_data.file_id}"
-        if VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
-            VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
-    except Exception as e:
-        log.debug("This was most likely caused by bypassing embedding processing")
-        log.debug(e)
-        pass
+    if delete_file:
+        try:
+            # Remove the file's collection from vector database
+            file_collection = f"file-{form_data.file_id}"
+            if VECTOR_DB_CLIENT.has_collection(collection_name=file_collection):
+                VECTOR_DB_CLIENT.delete_collection(collection_name=file_collection)
+        except Exception as e:
+            log.debug("This was most likely caused by bypassing embedding processing")
+            log.debug(e)
+            pass
 
-    # Delete file from database
-    Files.delete_file_by_id(form_data.file_id)
+        # Delete file from database
+        Files.delete_file_by_id(form_data.file_id)
 
     if knowledge:
         data = knowledge.data or {}

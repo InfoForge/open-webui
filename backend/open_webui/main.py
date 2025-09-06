@@ -157,6 +157,7 @@ from open_webui.config import (
     IMAGE_SIZE,
     IMAGE_STEPS,
     IMAGES_OPENAI_API_BASE_URL,
+    IMAGES_OPENAI_API_VERSION,
     IMAGES_OPENAI_API_KEY,
     IMAGES_GEMINI_API_BASE_URL,
     IMAGES_GEMINI_API_KEY,
@@ -329,7 +330,7 @@ from open_webui.config import (
     ENABLE_MESSAGE_RATING,
     ENABLE_USER_WEBHOOKS,
     ENABLE_EVALUATION_ARENA_MODELS,
-    ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS,
+    BYPASS_ADMIN_ACCESS_CONTROL,
     USER_PERMISSIONS,
     DEFAULT_USER_ROLE,
     PENDING_USER_OVERLAY_CONTENT,
@@ -378,7 +379,7 @@ from open_webui.config import (
     RESPONSE_WATERMARK,
     # Admin
     ENABLE_ADMIN_CHAT_ACCESS,
-    ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS,
+    BYPASS_ADMIN_ACCESS_CONTROL,
     ENABLE_ADMIN_EXPORT,
     # Tasks
     TASK_MODEL,
@@ -924,14 +925,19 @@ try:
         app.state.config.RAG_EMBEDDING_MODEL,
         RAG_EMBEDDING_MODEL_AUTO_UPDATE,
     )
-
-    app.state.rf = get_rf(
-        app.state.config.RAG_RERANKING_ENGINE,
-        app.state.config.RAG_RERANKING_MODEL,
-        app.state.config.RAG_EXTERNAL_RERANKER_URL,
-        app.state.config.RAG_EXTERNAL_RERANKER_API_KEY,
-        RAG_RERANKING_MODEL_AUTO_UPDATE,
-    )
+    if (
+        app.state.config.ENABLE_RAG_HYBRID_SEARCH
+        and not app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL
+    ):
+        app.state.rf = get_rf(
+            app.state.config.RAG_RERANKING_ENGINE,
+            app.state.config.RAG_RERANKING_MODEL,
+            app.state.config.RAG_EXTERNAL_RERANKER_URL,
+            app.state.config.RAG_EXTERNAL_RERANKER_API_KEY,
+            RAG_RERANKING_MODEL_AUTO_UPDATE,
+        )
+    else:
+        app.state.rf = None
 except Exception as e:
     log.error(f"Error updating models: {e}")
     pass
@@ -1014,6 +1020,7 @@ app.state.config.ENABLE_IMAGE_GENERATION = ENABLE_IMAGE_GENERATION
 app.state.config.ENABLE_IMAGE_PROMPT_GENERATION = ENABLE_IMAGE_PROMPT_GENERATION
 
 app.state.config.IMAGES_OPENAI_API_BASE_URL = IMAGES_OPENAI_API_BASE_URL
+app.state.config.IMAGES_OPENAI_API_VERSION = IMAGES_OPENAI_API_VERSION
 app.state.config.IMAGES_OPENAI_API_KEY = IMAGES_OPENAI_API_KEY
 
 app.state.config.IMAGES_GEMINI_API_BASE_URL = IMAGES_GEMINI_API_BASE_URL
@@ -1290,7 +1297,7 @@ async def get_models(
             model_info = Models.get_model_by_id(model["id"])
             if model_info:
                 if (
-                    (user.role == "admin" and ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS)
+                    (user.role == "admin" and BYPASS_ADMIN_ACCESS_CONTROL)
                     or user.id == model_info.user_id
                     or has_access(
                         user.id, type="read", access_control=model_info.access_control
@@ -1338,7 +1345,7 @@ async def get_models(
     # Filter out models that the user does not have access to
     if (
         user.role == "user"
-        or (user.role == "admin" and not ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS)
+        or (user.role == "admin" and not BYPASS_ADMIN_ACCESS_CONTROL)
     ) and not BYPASS_MODEL_ACCESS_CONTROL:
         models = get_filtered_models(models, user)
 
@@ -1411,7 +1418,7 @@ async def chat_completion(
 
             # Check if user has access to the model
             if not BYPASS_MODEL_ACCESS_CONTROL and (
-                user.role != "admin" or not ENABLE_ADMIN_WORKSPACE_CONTENT_ACCESS
+                user.role != "admin" or not BYPASS_ADMIN_ACCESS_CONTROL
             ):
                 try:
                     check_model_access(user, model)
@@ -1432,10 +1439,14 @@ async def chat_completion(
         stream_delta_chunk_size = form_data.get("params", {}).get(
             "stream_delta_chunk_size"
         )
+        reasoning_tags = form_data.get("params", {}).get("reasoning_tags")
 
         # Model Params
         if model_info_params.get("stream_delta_chunk_size"):
             stream_delta_chunk_size = model_info_params.get("stream_delta_chunk_size")
+
+        if model_info_params.get("reasoning_tags") is not None:
+            reasoning_tags = model_info_params.get("reasoning_tags")
 
         metadata = {
             "user_id": user.id,
@@ -1452,6 +1463,7 @@ async def chat_completion(
             "direct": model_item.get("direct", False),
             "params": {
                 "stream_delta_chunk_size": stream_delta_chunk_size,
+                "reasoning_tags": reasoning_tags,
                 "function_calling": (
                     "native"
                     if (
@@ -1509,7 +1521,7 @@ async def chat_completion(
             try:
                 event_emitter = get_event_emitter(metadata)
                 await event_emitter(
-                    {"type": "task-cancelled"},
+                    {"type": "chat:tasks:cancel"},
                 )
             except Exception as e:
                 pass
@@ -1525,13 +1537,20 @@ async def chat_completion(
                             "error": {"content": str(e)},
                         },
                     )
+
+                    event_emitter = get_event_emitter(metadata)
+                    await event_emitter(
+                        {
+                            "type": "chat:message:error",
+                            "data": {"error": {"content": str(e)}},
+                        }
+                    )
+                    await event_emitter(
+                        {"type": "chat:tasks:cancel"},
+                    )
+
                 except:
                     pass
-
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(e),
-            )
 
     if (
         metadata.get("session_id")
@@ -1632,8 +1651,18 @@ async def list_tasks_by_chat_id_endpoint(
 @app.get("/api/config")
 async def get_app_config(request: Request):
     user = None
-    if "token" in request.cookies:
+    token = None
+
+    auth_header = request.headers.get("Authorization")
+    if auth_header:
+        cred = get_http_authorization_cred(auth_header)
+        if cred:
+            token = cred.credentials
+
+    if not token and "token" in request.cookies:
         token = request.cookies.get("token")
+
+    if token:
         try:
             data = decode_token(token)
         except Exception as e:

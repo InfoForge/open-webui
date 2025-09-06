@@ -119,18 +119,26 @@ async def get_tools(
                     function_name = spec["name"]
 
                     auth_type = tool_server_connection.get("auth_type", "bearer")
-                    token = None
+                    headers = {}
 
                     if auth_type == "bearer":
-                        token = tool_server_connection.get("key", "")
+                        headers["Authorization"] = (
+                            f"Bearer {tool_server_connection.get('key', '')}"
+                        )
                     elif auth_type == "session":
-                        token = request.state.token.credentials
+                        headers["Authorization"] = (
+                            f"Bearer {request.state.token.credentials}"
+                        )
+                    elif auth_type == "request_headers":
+                        headers.update(dict(request.headers))
 
-                    def make_tool_function(function_name, token, tool_server_data):
+                    headers["Content-Type"] = "application/json"
+
+                    def make_tool_function(function_name, tool_server_data, headers):
                         async def tool_function(**kwargs):
                             return await execute_tool_server(
-                                token=token,
                                 url=tool_server_data["url"],
+                                headers=headers,
                                 name=function_name,
                                 params=kwargs,
                                 server_data=tool_server_data,
@@ -139,7 +147,7 @@ async def get_tools(
                         return tool_function
 
                     tool_function = make_tool_function(
-                        function_name, token, tool_server_data
+                        function_name, tool_server_data, headers
                     )
 
                     callable = get_async_tool_function_and_apply_extra_params(
@@ -489,14 +497,14 @@ async def get_tool_servers(request: Request):
     if request.app.state.redis is not None:
         try:
             tool_servers = json.loads(await request.app.state.redis.get("tool_servers"))
+            request.app.state.TOOL_SERVERS = tool_servers
         except Exception as e:
             log.error(f"Error fetching tool_servers from Redis: {e}")
 
     if not tool_servers:
-        await set_tool_servers(request)
+        tool_servers = await set_tool_servers(request)
 
-    request.app.state.TOOL_SERVERS = tool_servers
-    return request.app.state.TOOL_SERVERS
+    return tool_servers
 
 
 async def get_tool_server_data(token: str, url: str) -> Dict[str, Any]:
@@ -610,7 +618,11 @@ async def get_tool_servers_data(
 
 
 async def execute_tool_server(
-    token: str, url: str, name: str, params: Dict[str, Any], server_data: Dict[str, Any]
+    url: str,
+    headers: Dict[str, str],
+    name: str,
+    params: Dict[str, Any],
+    server_data: Dict[str, Any],
 ) -> Any:
     error = None
     try:
@@ -670,11 +682,6 @@ async def execute_tool_server(
                 raise Exception(
                     f"Request body expected for operation '{name}' but none found."
                 )
-
-        headers = {"Content-Type": "application/json"}
-
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
 
         async with aiohttp.ClientSession(
             trust_env=True, timeout=aiohttp.ClientTimeout(total=AIOHTTP_CLIENT_TIMEOUT)
